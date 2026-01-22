@@ -38,14 +38,14 @@ def parse_frontmatter(file_path):
         return None
 
 
-def discover_skills(dir_path, known_subdirs):
+def discover_skills(dir_path, custom_subdirs):
     """Discover potential skills in the given directory."""
     if not os.path.isdir(dir_path):
         print(f"Error: Directory '{dir_path}' does not exist.")
         return
 
     found_any = False
-    for sub in known_subdirs:
+    for sub in custom_subdirs:
         agent_path = os.path.join(dir_path, sub)
         if os.path.exists(agent_path) and os.path.isdir(agent_path):
             print(f"Found agent directory: {sub}")
@@ -85,7 +85,7 @@ def discover_skills(dir_path, known_subdirs):
 def main():
     """Main entry point for the skiller CLI."""
     config = load_config()
-    known_subdirs = config.get('known_subdirs', [])
+    custom_subdirs = config.get('custom_subdirs', [])
 
     parser = argparse.ArgumentParser(
         prog='skiller',
@@ -106,7 +106,7 @@ def main():
     if args.list:
         print("Listing installed skills... (not implemented)")
     if args.dd is not None:
-        discover_skills(args.dd, known_subdirs)
+        discover_skills(args.dd, custom_subdirs)
 
 
 if __name__ == '__main__':
