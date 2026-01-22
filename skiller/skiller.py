@@ -18,13 +18,14 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import sys
 from typing import Iterable, List, Optional
 
 import yaml
 
 # Try to import questionary for nice cursor-based menus. If it's not installed
-# or importing fails, we'll fall back to simple input() prompts.
+# or importing fails, we'll fall back to curses or simple input() prompts.
 try:
     import questionary  # type: ignore
     from questionary import Choice  # type: ignore
@@ -32,6 +33,13 @@ try:
     _HAVE_QUESTIONARY = True
 except Exception:
     _HAVE_QUESTIONARY = False
+
+try:
+    import curses
+
+    _HAVE_CURSES = True
+except Exception:
+    _HAVE_CURSES = False
 
 
 def load_config() -> dict:
@@ -120,6 +128,89 @@ def discover_skills(dir_path: str, agent_subdirs: Iterable[str]) -> None:
         print("\nNo known agent directories found in the specified directory.")
 
 
+def _format_relative_path(path: str, base_dir: str) -> str:
+    """Return path relative to base_dir with a ./ prefix when appropriate."""
+    rel_path = os.path.relpath(path, start=base_dir)
+    if rel_path == ".":
+        return "./"
+    if rel_path.startswith("../"):
+        return rel_path
+    if not rel_path.startswith("./"):
+        rel_path = f"./{rel_path}"
+    return rel_path
+
+
+def list_skills_simple(dir_path: str, agent_subdirs: Iterable[str]) -> None:
+    """List skills with one line per skill: dir skill description."""
+    dir_path_exp = os.path.expanduser(dir_path)
+    if not os.path.isdir(dir_path_exp):
+        print(f"Error: Directory '{dir_path_exp}' does not exist.", file=sys.stderr)
+        return
+
+    found_any = False
+    for sub in agent_subdirs:
+        agent_path = os.path.join(dir_path_exp, sub)
+        if not os.path.isdir(agent_path):
+            continue
+        found_any = True
+        try:
+            items = os.listdir(agent_path)
+            skill_dirs = [item for item in items if os.path.isdir(os.path.join(agent_path, item))]
+            for skill in sorted(skill_dirs):
+                skill_path = os.path.join(agent_path, skill)
+                skill_md = os.path.join(skill_path, "SKILL.md")
+                description = "(no description)"
+                if os.path.isfile(skill_md):
+                    fm = parse_frontmatter(skill_md)
+                    if fm and isinstance(fm, dict):
+                        raw_desc = fm.get("description")
+                        if raw_desc:
+                            description = str(raw_desc).replace("\n", " ")
+                rel_agent_path = _format_relative_path(agent_path, dir_path_exp)
+                print(f"{rel_agent_path} {skill} {description}")
+        except PermissionError:
+            print(f"Permission denied accessing {agent_path}.")
+    if not found_any:
+        print("No known agent directories found in the specified directory.")
+
+
+def _gather_skill_candidates(base_dir: str, subdirs: Iterable[str]) -> List[dict[str, str]]:
+    """Return discovered skills under the given subdirectories."""
+    candidates: List[dict[str, str]] = []
+    for sub in subdirs:
+        search_path = os.path.join(base_dir, sub)
+        if not os.path.isdir(search_path):
+            continue
+        try:
+            items = os.listdir(search_path)
+        except PermissionError:
+            print(f"Permission denied accessing {search_path}.")
+            continue
+        valid_dirs = [item for item in items if os.path.isdir(os.path.join(search_path, item))]
+        for skill in sorted(valid_dirs):
+            skill_path = os.path.join(search_path, skill)
+            description = "(no description)"
+            display_name = skill
+            skill_md = os.path.join(skill_path, "SKILL.md")
+            if os.path.isfile(skill_md):
+                fm = parse_frontmatter(skill_md)
+                if fm and isinstance(fm, dict):
+                    display_name = fm.get("name") or skill
+                    raw_desc = fm.get("description")
+                    if raw_desc:
+                        description = str(raw_desc).replace("\n", " ")
+            candidates.append(
+                {
+                    "name": display_name,
+                    "description": description,
+                    "path": skill_path,
+                    "rel_path": _format_relative_path(skill_path, base_dir),
+                    "folder_name": os.path.basename(skill_path),
+                }
+            )
+    return candidates
+
+
 def list_installed_skills_for_paths(paths: Iterable[str]) -> None:
     """List skills found under a list of directory paths.
 
@@ -166,6 +257,102 @@ def list_installed_skills_for_paths(paths: Iterable[str]) -> None:
 #
 
 
+_SINGLE_SELECT_HINT = "Use ↑/↓, Enter to select, q to quit"
+_MULTI_SELECT_HINT = "Use ↑/↓, Space to toggle, Enter to confirm, q to quit"
+
+
+def _format_prompt(message: str, hint: Optional[str] = None) -> str:
+    if not hint:
+        return message
+    return f"{message}\n{hint}"
+
+
+def _can_use_curses() -> bool:
+    return _HAVE_CURSES and sys.stdin.isatty() and sys.stdout.isatty()
+
+
+def _try_curses_single_select(
+    message: str, choices: List[str], default: Optional[str]
+) -> tuple[bool, Optional[str]]:
+    if not _can_use_curses():
+        return False, None
+    try:
+        default_index = choices.index(default) if default in choices else 0
+
+        def _run(stdscr: "curses.window") -> Optional[str]:
+            curses.curs_set(0)
+            stdscr.keypad(True)
+            idx = default_index
+            while True:
+                stdscr.clear()
+                stdscr.addstr(0, 0, message)
+                for i, option in enumerate(choices):
+                    prefix = "> " if i == idx else "  "
+                    if i == idx:
+                        stdscr.addstr(i + 2, 0, f"{prefix}{option}", curses.A_REVERSE)
+                    else:
+                        stdscr.addstr(i + 2, 0, f"{prefix}{option}")
+                stdscr.addstr(len(choices) + 3, 0, _SINGLE_SELECT_HINT)
+                key = stdscr.getch()
+                if key in (curses.KEY_UP, ord("k")):
+                    idx = (idx - 1) % len(choices)
+                elif key in (curses.KEY_DOWN, ord("j")):
+                    idx = (idx + 1) % len(choices)
+                elif key in (curses.KEY_ENTER, 10, 13):
+                    return choices[idx]
+                elif key in (27, ord("q")):
+                    return None
+
+        return True, curses.wrapper(_run)
+    except Exception:
+        return False, None
+
+
+def _try_curses_multi_select(
+    message: str, choices: List[str], default: List[str]
+) -> tuple[bool, Optional[List[str]]]:
+    if not _can_use_curses():
+        return False, None
+    try:
+        default_indices = {choices.index(item) for item in default if item in choices}
+
+        def _run(stdscr: "curses.window") -> Optional[List[str]]:
+            curses.curs_set(0)
+            stdscr.keypad(True)
+            idx = 0
+            selected = set(default_indices)
+            while True:
+                stdscr.clear()
+                stdscr.addstr(0, 0, message)
+                for i, option in enumerate(choices):
+                    marker = "[x]" if i in selected else "[ ]"
+                    prefix = ">" if i == idx else " "
+                    line = f"{prefix} {marker} {option}"
+                    if i == idx:
+                        stdscr.addstr(i + 2, 0, line, curses.A_REVERSE)
+                    else:
+                        stdscr.addstr(i + 2, 0, line)
+                stdscr.addstr(len(choices) + 3, 0, _MULTI_SELECT_HINT)
+                key = stdscr.getch()
+                if key in (curses.KEY_UP, ord("k")):
+                    idx = (idx - 1) % len(choices)
+                elif key in (curses.KEY_DOWN, ord("j")):
+                    idx = (idx + 1) % len(choices)
+                elif key == ord(" "):
+                    if idx in selected:
+                        selected.remove(idx)
+                    else:
+                        selected.add(idx)
+                elif key in (curses.KEY_ENTER, 10, 13):
+                    return [choices[i] for i in range(len(choices)) if i in selected]
+                elif key in (27, ord("q")):
+                    return None
+
+        return True, curses.wrapper(_run)
+    except Exception:
+        return False, None
+
+
 def _select_option(message: str, choices: List[str], default: Optional[str] = None) -> Optional[str]:
     """Select an option from choices using questionary if available, otherwise text input.
 
@@ -174,10 +361,11 @@ def _select_option(message: str, choices: List[str], default: Optional[str] = No
     if _HAVE_QUESTIONARY:
         try:
             q_choices = [Choice(c) for c in choices]
+            prompt = _format_prompt(message, _SINGLE_SELECT_HINT)
             if default and default in choices:
-                selected = questionary.select(message, choices=q_choices, default=default).ask()
+                selected = questionary.select(prompt, choices=q_choices, default=default).ask()
             else:
-                selected = questionary.select(message, choices=q_choices).ask()
+                selected = questionary.select(prompt, choices=q_choices).ask()
             if selected is None:
                 return None
             return str(selected)
@@ -185,9 +373,13 @@ def _select_option(message: str, choices: List[str], default: Optional[str] = No
             # Fall back to text prompt below
             pass
 
+    ran_curses, selected = _try_curses_single_select(message, choices, default)
+    if ran_curses:
+        return selected
+
     # Fallback: show numbered menu and accept a number or name
     print()
-    print(message)
+    print(_format_prompt(message, _SINGLE_SELECT_HINT))
     for i, c in enumerate(choices, start=1):
         marker = " (default)" if default and c == default else ""
         print(f"  {i}) {c}{marker}")
@@ -206,6 +398,69 @@ def _select_option(message: str, choices: List[str], default: Optional[str] = No
             if choice in choices:
                 return choice
         print("Invalid choice. Enter a number, exact option name, or 'q' to quit.")
+
+
+def _select_multiple(
+    message: str, choices: List[str], default: Optional[List[str]] = None
+) -> Optional[List[str]]:
+    """Select multiple options using questionary when available."""
+    if _HAVE_QUESTIONARY:
+        try:
+            q_choices = [Choice(c) for c in choices]
+            prompt = _format_prompt(message, _MULTI_SELECT_HINT)
+            picked = questionary.checkbox(prompt, choices=q_choices, default=default or []).ask()
+            if picked is None:
+                return None
+            return [str(item) for item in picked]
+        except Exception:
+            # Fall back to text prompt below
+            pass
+
+    ran_curses, selected = _try_curses_multi_select(message, choices, default or [])
+    if ran_curses:
+        return selected
+
+    print()
+    print(_format_prompt(message, _MULTI_SELECT_HINT))
+    for idx, choice in enumerate(choices, start=1):
+        marker = " (default)" if default and choice in default else ""
+        print(f"  {idx}) {choice}{marker}")
+    print("  q) Quit")
+    while True:
+        response = input("Select options (numbers or names separated by spaces/comma): ").strip()
+        if response.lower() in ("q", "quit", "exit"):
+            return None
+        if response == "" and default:
+            return list(default)
+        tokens = [token for token in response.replace(",", " ").split() if token]
+        if not tokens:
+            print("Enter at least one option or 'q' to quit.")
+            continue
+        selected: List[str] = []
+        seen: set[str] = set()
+        invalid = False
+        for token in tokens:
+            if token.isdigit():
+                idx = int(token) - 1
+                if 0 <= idx < len(choices):
+                    value = choices[idx]
+                else:
+                    invalid = True
+                    break
+            else:
+                if token in choices:
+                    value = token
+                else:
+                    invalid = True
+                    break
+            if value not in seen:
+                seen.add(value)
+                selected.append(value)
+        if invalid:
+            print("One of the selections was invalid. Try again or 'q' to quit.")
+            continue
+        if selected:
+            return selected
 
 
 def _text_input(message: str, default: Optional[str] = None) -> Optional[str]:
@@ -230,51 +485,94 @@ def _text_input(message: str, default: Optional[str] = None) -> Optional[str]:
     return val
 
 
+def _copy_skill_tree(source: str, destination_root: str) -> Optional[str]:
+    """Copy the skill directory into the destination root, avoiding overrides."""
+    destination_root_exp = os.path.expanduser(destination_root)
+    os.makedirs(destination_root_exp, exist_ok=True)
+    destination_path = os.path.join(destination_root_exp, os.path.basename(source))
+    if os.path.abspath(destination_path) == os.path.abspath(source):
+        print("  Skill already in the target location; skipping.")
+        return None
+    if os.path.exists(destination_path):
+        print(f"  Skill already exists at {destination_path}; skipping.")
+        return None
+    try:
+        shutil.copytree(source, destination_path)
+    except OSError as exc:
+        print(f"  Failed to install into {destination_path}: {exc}")
+        return None
+    return destination_path
+
+
+def install_skill_interactive(config: dict) -> None:
+    """Prompt the user to choose a discovered skill and install it."""
+    base_dir = os.getcwd()
+    subdirs = config.get("custom_subdirs") or [".opencode/skills", ".claude/skills"]
+    candidates = _gather_skill_candidates(base_dir, subdirs)
+    if not candidates:
+        print("No discoverable skills found under the configured subdirectories.")
+        return
+    choices = []
+    for candidate in candidates:
+        desc = candidate["description"]
+        desc_short = desc if len(desc) <= 80 else f"{desc[:77]}..."
+        choices.append(f"{candidate['name']} [{candidate['rel_path']}] - {desc_short}")
+    selected = _select_option("Choose a skill to install:", choices)
+    if not selected:
+        return
+    index = choices.index(selected)
+    candidate = candidates[index]
+
+    agent_dirs = config.get("agent_dirs", {}) or {}
+    if not agent_dirs:
+        print("No agent configurations available to install into.")
+        return
+    agents = sorted(agent_dirs.keys())
+    if not agents:
+        print("No agents defined in configuration.")
+        return
+    agent_default = [agents[0]]
+    selected_agents = _select_multiple("Choose agent(s) to install for:", agents, default=agent_default)
+    if not selected_agents:
+        return
+    path_choices = ["user", "project"]
+    selected_paths = _select_multiple("Choose path types to install into (user/project):", path_choices, default=["user"])
+    if not selected_paths:
+        return
+
+    installed_any = False
+    had_targets = False
+    for agent in selected_agents:
+        ad = agent_dirs.get(agent, {}) or {}
+        for path_type in selected_paths:
+            targets = ad.get(path_type, [])
+            if not targets:
+                print(f"No configured {path_type} paths for agent '{agent}'.")
+                continue
+            had_targets = True
+            for target in targets:
+                result = _copy_skill_tree(candidate["path"], target)
+                if result:
+                    installed_any = True
+                    print(f"Installed {candidate['name']} for agent '{agent}' ({path_type}) -> {result}")
+    if not had_targets:
+        print("No install targets were available for the selected agents.")
+    elif not installed_any:
+        print("No installations were performed (targets already existed or failed).")
+
 def run_interactive(config: dict) -> None:
     """Run the cursor-based interactive TUI with sensible defaults."""
     agent_dirs = config.get("agent_dirs", {}) or {}
-    commands = ["dd", "list", "quit"]
+    commands = ["dd", "list", "install", "quit"]
 
     cmd = _select_option("Choose a command:", commands, default="dd")
     if not cmd or cmd == "quit":
         return
 
     if cmd == "dd":
-        # Ask for base directory (where to look for agent-specific subdirs)
-        default_dir = os.getcwd()
-        dir_to_use = _text_input("Discovery base directory", default=default_dir)
-        if not dir_to_use:
-            return
-        # Ask which subdirs to search: show known agent subdirs from config if present,
-        # otherwise fall back to a small default list.
-        # The discovery operation used to expect a list of subdirs; we will present
-        # the keys of `agent_dirs` as selectable options and allow "All known".
-        subdir_choices = []
-        # If config has explicit "custom_subdirs" use that by default
-        custom_subs = config.get("custom_subdirs")
-        if custom_subs:
-            subdir_choices = list(custom_subs)
-        else:
-            # present agent dir keys (user-facing) as choices
-            subdir_choices = list(agent_dirs.keys()) or [".opencode/skills", ".claude/skills"]
-
-        # Let user pick one or "All"
-        pick_choices = ["All"] + sorted(subdir_choices)
-        pick = _select_option("Select which agent directories to search (choose 'All' to search them all):", pick_choices, default="All")
-        if not pick:
-            return
-
-        if pick == "All":
-            # flatten all configured agent subdir names if agent_dirs values contain explicit paths,
-            # otherwise fallback to the known `subdir_choices`
-            # If agent_dirs values are mappings with 'project' / 'user', we want keys used earlier.
-            # For backward compatibility we will try to use 'custom_subdirs' when present.
-            to_search = custom_subs if custom_subs else subdir_choices
-        else:
-            to_search = [pick]
-
-        # Discover skills
-        discover_skills(dir_to_use, to_search)
+        base_dir = os.getcwd()
+        subdirs = config.get("custom_subdirs") or [".opencode/skills", ".claude/skills"]
+        list_skills_simple(base_dir, subdirs)
         return
 
     if cmd == "list":
@@ -308,6 +606,10 @@ def run_interactive(config: dict) -> None:
             list_installed_skills_for_paths(paths)
         return
 
+    if cmd == "install":
+        install_skill_interactive(config)
+        return
+
 
 def main() -> None:
     """Main entry point for the skiller CLI."""
@@ -327,6 +629,7 @@ def main() -> None:
         help="Discovery: look for known agents dirs in DIR (default: current directory) and list potential skills",
     )
     parser.add_argument("--interactive", action="store_true", help="Run interactive TUI")
+    parser.add_argument("--install", action="store_true", help="Install a discovered skill")
 
     args = parser.parse_args()
 
@@ -355,6 +658,10 @@ def main() -> None:
                     seen.add(p)
                     paths.append(p)
         list_installed_skills_for_paths(paths)
+        return
+
+    if args.install:
+        install_skill_interactive(config)
         return
 
     if args.dd is not None:

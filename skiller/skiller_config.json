@@ -6,8 +6,8 @@
       "project": [".opencode/skill"]
     },
     "opencode": {
-      "user": ["~/.config/opencode/skills"],
-      "project": [".opencode/skills"]
+      "user": ["~/.config/opencode/skill"],
+      "project": [".opencode/skill"]
     },
     "qwen": {
       "user": ["~/.qwen/skills"],

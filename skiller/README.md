@@ -40,6 +40,7 @@ Helper script to discover, install and manage skills for AI agents.
 - `skiller` : Show help message (default behavior)
 - `skiller --list` : List all installed skills (not implemented yet)
 - `skiller --dd <dir>` : Discovery: look for known agents dirs in `<dir>` and list potential skills (not implemented yet)
+- `skiller --install` : Launch the install prompt to copy a discovered skill into one or more configured agent paths
 
 ## Development
 
