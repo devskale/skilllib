@@ -1,0 +1,16 @@
+[project]
+name = "skiller"
+version = "0.1.0"
+description = "Helper script to discover, install and manage skills for AI agents"
+authors = [{name = "Johann Waldherr"}]
+requires-python = ">=3.9"
+
+[project.scripts]
+skiller = "skiller:main"
+
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+py-modules = ["skiller"]
