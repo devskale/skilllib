@@ -211,23 +211,35 @@ def _gather_skill_candidates(base_dir: str, subdirs: Iterable[str]) -> List[dict
     return candidates
 
 
-def list_installed_skills_for_paths(paths: Iterable[str]) -> None:
+def list_installed_skills_for_paths(config: dict, paths: Iterable[str]) -> None:
     """List skills found under a list of directory paths.
 
     Each path is considered a skills root containing subdirectories for each skill.
     """
+    # Build mapping from expanded path to label like "opencode[user]"
+    path_to_label = {}
+    for agent, ad in config.get("agent_dirs", {}).items():
+        if not isinstance(ad, dict):
+            continue
+        for path_type in ["user", "project"]:
+            for path in ad.get(path_type, []):
+                expanded = os.path.expanduser(path)
+                path_to_label[expanded] = f"{agent}[{path_type}]"
+
     any_found = False
     for p in paths:
         p_expanded = os.path.expanduser(p)
         if not os.path.isdir(p_expanded):
-            print(f"(missing) {p_expanded}")
+            label = path_to_label.get(p_expanded, p_expanded)
+            print(f"(missing) {label}")
             continue
         try:
             items = os.listdir(p_expanded)
             skill_dirs = [item for item in items if os.path.isdir(os.path.join(p_expanded, item))]
             if skill_dirs:
                 any_found = True
-                print(f"\nSkills in {p_expanded}:")
+                label = path_to_label.get(p_expanded, p_expanded)
+                print(f"\nSkills in {label}:")
                 for skill in sorted(skill_dirs):
                     skill_md = os.path.join(p_expanded, skill, "SKILL.md")
                     if os.path.isfile(skill_md):
@@ -245,9 +257,11 @@ def list_installed_skills_for_paths(paths: Iterable[str]) -> None:
                     else:
                         print(f"  - {skill}: (no SKILL.md)")
             else:
-                print(f"No skills found under {p_expanded}.")
+                label = path_to_label.get(p_expanded, p_expanded)
+                print(f"No skills found under {label}.")
         except PermissionError:
-            print(f"Permission denied accessing {p_expanded}.")
+            label = path_to_label.get(p_expanded, p_expanded)
+            print(f"Permission denied accessing {label}.")
     if not any_found:
         print("\nNo skills discovered in the provided paths.")
 
@@ -485,23 +499,25 @@ def _text_input(message: str, default: Optional[str] = None) -> Optional[str]:
     return val
 
 
-def _copy_skill_tree(source: str, destination_root: str) -> Optional[str]:
-    """Copy the skill directory into the destination root, avoiding overrides."""
+def _copy_skill_tree(source: str, destination_root: str) -> tuple[str, Optional[str]]:
+    """Copy the skill directory into the destination root, avoiding overrides.
+
+    Returns a tuple of (status, path) where status is one of: installed, exists,
+    same, error.
+    """
     destination_root_exp = os.path.expanduser(destination_root)
     os.makedirs(destination_root_exp, exist_ok=True)
     destination_path = os.path.join(destination_root_exp, os.path.basename(source))
     if os.path.abspath(destination_path) == os.path.abspath(source):
-        print("  Skill already in the target location; skipping.")
-        return None
+        return "same", destination_path
     if os.path.exists(destination_path):
-        print(f"  Skill already exists at {destination_path}; skipping.")
-        return None
+        return "exists", destination_path
     try:
         shutil.copytree(source, destination_path)
     except OSError as exc:
         print(f"  Failed to install into {destination_path}: {exc}")
-        return None
-    return destination_path
+        return "error", destination_path
+    return "installed", destination_path
 
 
 def install_skill_interactive(config: dict) -> None:
@@ -551,10 +567,20 @@ def install_skill_interactive(config: dict) -> None:
                 continue
             had_targets = True
             for target in targets:
-                result = _copy_skill_tree(candidate["path"], target)
-                if result:
+                status, result_path = _copy_skill_tree(candidate["path"], target)
+                if status == "installed":
                     installed_any = True
-                    print(f"Installed {candidate['name']} for agent '{agent}' ({path_type}) -> {result}")
+                    print(
+                        f"Installed {candidate['name']} for agent '{agent}' ({path_type}) -> {result_path}"
+                    )
+                elif status == "exists":
+                    print(
+                        f"Already installed {candidate['name']} for agent '{agent}' ({path_type}) -> {result_path}"
+                    )
+                elif status == "same":
+                    print(
+                        f"Already installed {candidate['name']} for agent '{agent}' ({path_type}) -> {result_path}"
+                    )
     if not had_targets:
         print("No install targets were available for the selected agents.")
     elif not installed_any:
@@ -596,14 +622,14 @@ def run_interactive(config: dict) -> None:
             if not paths:
                 print("No configured agent paths to list.")
                 return
-            list_installed_skills_for_paths(paths)
+            list_installed_skills_for_paths(config, paths)
         else:
             ad = agent_dirs.get(choice, {}) or {}
             paths = ad.get("user", []) + ad.get("project", [])
             if not paths:
                 print(f"No configured paths for agent '{choice}'.")
                 return
-            list_installed_skills_for_paths(paths)
+            list_installed_skills_for_paths(config, paths)
         return
 
     if cmd == "install":
@@ -657,7 +683,7 @@ def main() -> None:
                 if p not in seen:
                     seen.add(p)
                     paths.append(p)
-        list_installed_skills_for_paths(paths)
+        list_installed_skills_for_paths(config, paths)
         return
 
     if args.install:
