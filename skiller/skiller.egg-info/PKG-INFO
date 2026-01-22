@@ -4,3 +4,4 @@ Version: 0.1.0
 Summary: Helper script to discover, install and manage skills for AI agents
 Author: Johann Waldherr
 Requires-Python: >=3.9
+Requires-Dist: pyyaml

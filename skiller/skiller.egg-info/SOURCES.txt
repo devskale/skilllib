@@ -5,4 +5,5 @@ skiller.egg-info/PKG-INFO
 skiller.egg-info/SOURCES.txt
 skiller.egg-info/dependency_links.txt
 skiller.egg-info/entry_points.txt
+skiller.egg-info/requires.txt
 skiller.egg-info/top_level.txt
